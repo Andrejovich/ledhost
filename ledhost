@@ -1,0 +1,554 @@
+#!/usr/bin/python
+
+import selectors, socket
+import time
+from types import SimpleNamespace as ns
+import blinkt
+import ledconfig, ledconn, ledutil
+
+APPNAME = "ledhost"
+APPVERSION = 0.01
+
+SEL = selectors.DefaultSelector()
+LEDS = []
+HEARTBEAT = None
+
+blinkt.set_brightness(ledconfig.BRIGHTNESS / 100)
+
+NOT_EXPIRED     = 0
+EXPIRE_TO_BLINK = 1
+EXPIRE_TO_PLAN  = 2
+EXPIRE_TO_STACK = 3
+EXPIRE_TO_BLACK = 4
+
+def main():
+    global LEDS, HEARTBEAT
+    LEDS = [BlinktLed(i) for i in range(0, blinkt.NUM_PIXELS)]
+    HEARTBEAT = Heartbeat()
+
+    lsock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    lsock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    lsock.bind(ledconfig.CONNECT)
+    lsock.listen()
+    print(f"ledhost - Listening on port {ledconfig.CONNECT_PORT}.")
+    lsock.setblocking(False)
+    SEL.register(lsock, selectors.EVENT_READ, data=None)
+
+    try:
+        while True:
+            events = SEL.select(timeout=1/60)
+            for key, mask in events:
+                if key.data is None:
+                    accept_connection(key.fileobj)
+                else:
+                    handle_connection(key, mask)
+
+            HEARTBEAT.pulse()
+            any_dirty = False
+            for led in LEDS:
+                expiration_status = led.is_expired()
+                expiration_status and led.expire(expiration_status)
+                if expiration_status or led.is_dirty():
+                    any_dirty = True
+            any_dirty and show()
+
+    except Exception as e:
+        SEL.close()
+        lsock.close()
+        raise e
+    finally:
+        SEL.close()
+        lsock.close()
+
+def accept_connection(sock):
+    conn, addr = sock.accept()
+    print(f"Connection from {addr}.")
+    HEARTBEAT.debug(ledconfig.DBG_CONN_ACCEPT)
+    conn.setblocking(False)
+    data = ns(
+        addr=addr,
+        inbound="",
+        outbound=b"",
+        is_outbound_empty=True,
+        is_new=True
+    )
+    SEL.register(conn, selectors.EVENT_READ | selectors.EVENT_WRITE, data=data)
+
+def handle_connection(key, mask):
+    sock, data = key.fileobj, key.data
+
+    if mask & selectors.EVENT_READ:
+        try:
+            inbound = sock.recv(1024)
+        except ConnectionResetError:
+            inbound = None
+
+        if inbound:
+            data.inbound += inbound.decode()
+            HEARTBEAT.debug(ledconfig.DBG_CONN_READ)
+            while "\n" in data.inbound or "\r" in data.inbound:
+                eol = data.inbound.find("\n")
+                eol = eol if eol != -1 else data.inbound.find("\r")
+                line = data.inbound[0:eol].strip()
+                data.inbound = data.inbound[eol+1:]
+                if not len(line.strip()):
+                    continue
+                handle_line(key, line)
+        else:
+            close_connection(key)
+
+    if mask & selectors.EVENT_WRITE:
+        if data.is_new:
+            data.is_new = False
+            on_connect(key)
+        if data.outbound:
+            HEARTBEAT.debug(ledconfig.DBG_CONN_WRITE)
+            dots = "" if data.is_outbound_empty else "... "
+            print(f"{dots}> {data.outbound!r}")
+
+            try:
+                sent = sock.send(data.outbound)
+                data.outbound = data.outbound[sent:]
+                data.is_outbound_empty = len(data.outbound) == 0
+            except ConnectionResetError:
+                close_connection(key)
+
+def on_connect(key):
+    say_hi(key, "iam", freetext=f"{APPNAME} version {APPVERSION}")
+    say_hi(key, "config", values={
+        "greenhack": ledconfig.GREENHACK,
+        "swap": ledconfig.SWAP
+    })
+    say_hi(key, "welcome")
+
+
+def close_connection(key, *args):
+    sock, data = key.fileobj, key.data
+    print(f"Closing connection to {data.addr}.")
+    HEARTBEAT.debug(ledconfig.DBG_CONN_CLOSE)
+    data.outbound = b""
+    data.is_outbound_empty = True
+    SEL.unregister(sock)
+    sock.close()
+
+def handle_line(key, line):
+    try:
+        message = ledconn.MessageParser().parse(line)
+    except ledconn.MessageParser.ParseError as e:
+        say_no(key, freetext=str(e))
+        HEARTBEAT.debug(ledconfig.DBG_MSG_ERR)
+        return
+
+    print(message.report())
+    handlers = {
+        ":led":     on_led_message,
+        ":off":     on_off_message,
+        ":pop":     on_pop_message,
+        ":knock":   on_knock_message,
+        ":bye":     close_connection,
+    }
+    prefixes = message.prefixes()
+    if prefixes not in handlers:
+        say_no(key, freetext=f"no handler for {message.prefixes()} messages")
+        return
+
+    try:
+        handlers[prefixes](key, ledconn.MessageParser().parse(line))
+    except ledconn.Message.ValidationError as e:
+        say_no(key, freetext=str(e))
+        HEARTBEAT.debug(ledconfig.DBG_MSG_ERR)
+    except NoError as e:
+        say_no(key, freetext=str(e))
+        HEARTBEAT.debug(ledconfig.DBG_MSG_ERR)
+    except Exception as e:
+        say_error(key, freetext=str(e))
+        HEARTBEAT.debug(ledconfig.DBG_EXCEPTION)
+
+
+def on_led_message(key, message):
+    message.validate(
+        require_objects=True,
+        required_values=["rgb"],
+        accepted_values=["keepalive"],
+        accepted_flags=["blink", "stack", "plan", "fadein", "fadeout"]
+    )
+
+    for led in get_leds(message.objects()):
+        try:
+            message["&stack"] and led.stack_active_frame()
+        except MaxSizeReachedError as e:
+            action = ledconfig.ON_EXCEED_MAX_STACK_SIZE
+            if action == ledconfig.ON_EXCEED_BYE:
+                say_bye(key, freetext=str(e))
+                close_connection(key)
+                return
+            elif action == ledconfig.ON_EXCEED_CLEAR:
+                led._stack = []
+                ledconfig.MAX_STACK_SIZE >=1 and led.push()
+            elif action == ledconfig.ON_EXCEED_DENY:
+                say_no(key, "stack", freetext=str(e))
+                return
+
+        led.set_pixel(
+            rgb=message["rgb"],
+            keep_alive=get_keepalive_value(message),
+            stack=message["&stack"],
+            blink=message["&blink"],
+            plan=message["&plan"],
+            fadein=message["&fadein"],
+            fadeout=True
+        )
+
+    say_ok(key)
+
+def on_off_message(key, message):
+    message.validate(
+        require_objects=True,
+        accepted_flags=["show"]
+    )
+
+    for led in get_leds(message.objects()):
+        led.clear()
+    say_ok(key)
+
+def on_pop_message(key, message):
+    message.validate(
+        require_objects=True,
+        accepted_flags=["show"]
+    )
+
+    for led in get_leds(message.objects()):
+        led.pop_frame()
+    say_ok(key)
+
+def on_knock_message(key, message):
+    message.validate(
+        require_objects=True,
+        accepted_values=["keep_alive"]
+    )
+
+    expiration = time.time() + get_keepalive_value(message)
+    for led in get_leds(message.objects()):
+        led._expiration = expiration
+    say_ok(key)
+
+def get_keepalive_value(message):
+    if "keep-alive" in message:
+        keep_alive = message["keep-alive"]
+        if keep_alive != ledconfig.KEEP_ALIVE \
+        and keep_alive > ledconfig.MAX_KEEP_ALIVE:
+            keep_alive = ledconfig.MAX_KEEP_ALIVE
+        return keep_alive
+    return ledconfig.KEEP_ALIVE
+
+def send_message(key, message):
+    key.data.outbound += bytes(f"{str(message)}".encode("utf-8"))
+
+def mksay(type):
+    def _sayer(key,
+               subtype=None,
+               objects=set(),
+               values={},
+               flags=[],
+               freetext=None):
+        send_message(key, ledconn.Message(
+            type,
+            subtype,
+            objects,
+            values,
+            flags,
+            freetext
+       ))
+    return _sayer
+
+say_ok = mksay("ok")
+say_no = mksay("no")
+say_info = mksay("info")
+say_error = mksay("error")
+say_hi = mksay("hi")
+say_bye = mksay("bye")
+
+
+def get_leds(leds):
+    result = []
+    if not isinstance(leds, list):
+        leds = [leds]
+    for ledno in leds:
+        if 0 <= ledno < blinkt.NUM_PIXELS and ledconfig.SWAP:
+            ledno =  blinkt.NUM_PIXELS - ledno - 1
+        result.append(LEDS[ledno])
+    return result
+
+def ledno_to_objno(ledno):
+    objno = ledno
+    if ledconfig.SWAP:
+        objno =  blinkt.NUM_PIXELS - objno -- 1
+    return f"#{objno}"
+
+def show():
+    blinkt.show()
+    for led in LEDS:
+        led.is_dirty(False)
+
+
+class BlinktLed:
+
+    def __init__(self, ledno):
+        self.ledno = ledno
+        self.frame = Frame((0,0,0))
+        self.stack = []
+        self.plan = []
+        self._isdirty = False
+
+    def set_pixel(self,
+                  rgb,
+                  keep_alive=None,
+                  stack=False,
+                  blink=False,
+                  plan=False,
+                  fadein=False,
+                  fadeout=True):
+        if stack:
+            self.stack_active_frame()
+
+        frame = Frame(
+            rgb,
+            keep_alive=keep_alive,
+            blink=blink,
+            fadein=fadein,
+            fadeout=fadeout
+        )
+        if blink:
+            self.plan_blink(frame)
+        elif plan:
+            self.plan_frame(frame)
+        else:
+            self.frame = frame
+            fadein and self.plan_fadein()
+            self._setpixel()
+        return self
+
+    def _setpixel(self):
+        rgb = ledutil.greenhack(self.frame.rgb)
+        blinkt.set_pixel(self.ledno, *rgb)
+        self.is_dirty(True)
+
+    def stack_active_frame(self, ignore_max_size=False):
+        objno = ledno_to_objno(self.ledno)
+        if self.frame.blink:
+            return
+
+        if len(self.stack) >= ledconfig.MAX_STACK_SIZE \
+        and not ignore_max_size:
+            raise MaxSizeReachedError(f"stack too big on led {objno}")
+
+        self.frame.plan = self.plan
+        self.stack.append(self.frame)
+        return self
+
+    def plan_frame(self, frame):
+        if frame.blink:
+            return self.plan_blink(frame)
+        self.plan.append(frame)
+        return self
+
+    def plan_blink(self, frame):
+        if not frame.blink:
+            return self.plan_frame(self)
+        for i, f in enumerate(self.plan):
+            if not f.blink:
+                self.plan.insert(i, frame)
+                return self
+        self.plan.append(frame)
+        return self
+
+    def plan_fadein(self):
+        if not self.frame.fadein:
+            return self
+        gradient = self.frame.get_fadein()
+        self.frame = gradient.pop(0)
+        idx = 0
+        for f in gradient:
+            self.plan.insert(idx, f)
+            idx += 1
+        return self
+
+    def count_nonblinky_plan(self):
+        for i, f in enumerate(self.plan):
+            if not f.blink:
+                return len(self.plan) - i
+        return 0
+
+    def activate_stacked_frame(self):
+        frame = None
+        while self.stack:
+            frame = self.stack.pop()
+            if not frame.is_expired():
+                self.frame = frame
+                self.plan = self.frame.plan
+                self.frame.plan = []
+                break
+        if frame is None:
+            self.frame = Frame((0,0,0))
+            self.stack = []
+            self.plan = []
+
+        self._setpixel()
+        return self
+
+    def activate_planned_frame(self):
+        self.frame = self.plan.pop(0)
+        self.frame.fadein and self.plan_fadein()
+        self.frame.activate()
+        self._setpixel()
+        return self
+
+    def is_dirty(self, dirty=None):
+        if dirty is None:
+            return self._isdirty
+        self._isdirty = not not dirty
+        return self
+
+    def is_expired(self):
+        has_plan = len(self.plan) > 0
+        has_stack = len(self.stack) > 0
+        has_blinky = has_plan and self.plan[0].blink
+        is_blinky = self.frame.blink
+        is_off = self.frame == (0,0,0) and not (self.stack or self.plan)
+        if is_off:
+            return NOT_EXPIRED
+        if (not is_blinky) and has_blinky:
+            return EXPIRE_TO_BLINK
+        if not self.frame.is_expired():
+            return NOT_EXPIRED
+        if has_plan:
+            return EXPIRE_TO_PLAN
+        if has_stack:
+            return EXPIRE_TO_STACK
+        return EXPIRE_TO_BLACK
+
+    def expire(self, expiration_status=None):
+        if expiration_status is None:
+            expiration_status = self.is_expired()
+
+        if expiration_status == NOT_EXPIRED:
+            return
+        if expiration_status == EXPIRE_TO_BLINK:
+            self.stack_active_frame(ignore_max_size=True)
+            self.activate_planned_frame()
+        elif expiration_status == EXPIRE_TO_PLAN:
+            self.activate_planned_frame()
+        elif expiration_status == EXPIRE_TO_STACK:
+            self.activate_stacked_frame()
+        elif expiration_status == EXPIRE_TO_BLACK:
+            self.set_pixel((0,0,0))
+        else:
+            name = f"{type(self).__name__}.expire()"
+            raise ValueError(f"invalid {expiration_status=} in call to {name}")
+
+class Frame:
+    def __init__(self,
+                 rgb,
+                 keep_alive=None,
+                 plan=None,
+                 blink=False,
+                 fadein=False,
+                 fadeout=True):
+        self.rgb = rgb
+        if not blink:
+            self.plan = plan
+            if keep_alive is None:
+                keep_alive = ledconfig.KEEP_ALIVE
+            elif keep_alive != ledconfig.KEEP_ALIVE:
+                keep_alive = min(keep_alive, ledconfig.MAX_KEEP_ALIVE)
+            self.keep_alive = keep_alive
+        else:
+            self.plan = None
+            self.keep_alive = ledconfig.KEEP_ALIVE_BLINK
+
+        self.last_time = time.time()
+        self.blink = blink
+        self.fadein = fadein
+        self.fadeout = fadeout
+
+    def __str__(self):
+        rgb = str(self.rgb)
+        keep_alive = expiration = plan = blinking = ""
+        if self.keep_alive:
+            keep_alive = f", keep alive {self.keep_alive}s"
+        if self.plan:
+            plan = f", {len(self.plan)} planned"
+        if self.blink:
+            blinking = "blinking "
+        return f"<Frame {blinking}{rgb}{keep_alive}{plan}>"
+
+    def activate(self):
+        self.last_time = time.time()
+
+    def is_expired(self):
+        return self.last_time + self.keep_alive < time.time()
+
+    def get_fadein(self, duration=0.5):
+        gradient = [
+            Frame(f, keep_alive=ledconfig.FRAME_LENGTH)
+            for f in ledutil.gradient(
+                (0,0,0),
+                self.rgb,
+                ledconfig.FPS * duration
+        )]
+        gradient[-1].keep_alive = self.keep_alive
+        return gradient
+
+class Heartbeat:
+    def __init__(self):
+        self.next_heartbeat = time.time() - 1
+
+    @property
+    def led(self):
+        if ledconfig.HEARTBEAT_LED is None:
+            return None
+        return get_leds(ledconfig.HEARTBEAT_LED)[0]
+
+    @property
+    def debug_led(self):
+        return get_leds(ledconfig.DEBUG_LED)[0]
+
+    def pulse(self):
+        t = time.time()
+        if self.next_heartbeat > t or self.led is None:
+            return
+        on = ledconfig.HEARTBEAT_RGB
+        off = (0,0,0)
+        self.led \
+            .set_pixel(off, blink=True) \
+            .set_pixel(on, blink=True, fadein=True)  \
+            .set_pixel(off, blink=True) \
+            .set_pixel(on, blink=True, fadein=True)  \
+            .set_pixel(off, blink=True)
+        self.next_heartbeat = t + ledconfig.HEARTBEAT_INTERVAL
+
+    def debug(self, bit):
+        if not ledconfig.DEBUG & bit:
+            return
+
+        rgb = None
+        if bit == ledconfig.DBG_CONN_ACCEPT:    rgb = (0, 32, 0)
+        elif bit == ledconfig.DBG_CONN_CLOSE:   rgb = (32, 32, 0)
+        elif bit == ledconfig.DBG_CONN_READ:    rgb = (0, 32, 16)
+        elif bit == ledconfig.DBG_CONN_WRITE:   rgb = (32, 0, 16)
+        elif bit == ledconfig.DBG_MSG_ERR:      rgb = (32, 16, 0)
+        elif bit == ledconfig.DBG_EXCEPTION:    rgb = (32, 0, 0)
+        rgb and self.debug_led.set_pixel(rgb, blink=True)
+
+class MaxSizeReachedError(Exception):
+    pass
+
+class NoError(Exception):
+    pass
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        quit()
+SEL.close()

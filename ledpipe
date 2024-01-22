@@ -1,0 +1,72 @@
+#!/usr/bin/python
+
+import fileinput
+from threading import Thread
+from queue import Queue, Empty
+import ledclient
+
+class Client(ledclient.Ledclient):
+    def on_hi_message(client, message):
+        print(f"\x1B[1;30m  {message}\x1B[0m", end="")
+
+    def on_hi_iam_message(client, message):
+        print(f"\x1B[1;34m  Hi, I am {message._freetext}\x1B[0m")
+
+    def on_hi_config_message(client, message):
+        print(f"\x1b[1;34m  My configuration is{message.args()}\x1B[0m")
+
+    def on_hi_welcome_message(client, message):
+        print(f"\x1B[32m  Hi, welcome.\x1B[0m")
+
+    def on_ok_message(client, message):
+        print(f"\x1B[32m  Ok.\x1B[0m")
+
+    def on_info_message(client, message):
+        print(
+            f"[ {message.prefixes()} ]{message.format_objects()}" \
+            f"{message.format_values()}{message.format_flags()}" \
+            f" {message.freetext()}"
+        )
+
+    def on_no_message(client, message):
+        print(f"\x1b[33m  No:\n  {message}\x1B[0m", end="")
+
+    def on_error_message(client, message):
+        print(f"\x1B[31m  Ledhost error:\n  {message}\x1B[0m", end="")
+
+
+def reader_thread(out_q):
+    for line in fileinput.input(encoding="utf-8"):
+        if line:
+            out_q.put(line)
+        else:
+            out_q.put(False)
+            return
+
+def get_input(q):
+    try:
+        line = q.get(timeout=1/24)
+    except Empty:
+        line = None
+    return line
+
+def main():
+    client = Client().connect()
+    ready = False
+    q = Queue()
+    try:
+        while True:
+            client.loop_once()
+            if client.ready and not ready:
+                ready = True
+                reader = Thread(target=reader_thread, args=(q,))
+                reader.start()
+            if ready:
+                line = get_input(q)
+                line and client.send_message(line)
+                if line is False:
+                    reader.join()
+                    quit()
+    except Exception:
+        quit()
+main()
