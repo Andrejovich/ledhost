@@ -164,6 +164,7 @@ def handle_line(key, line):
     except Exception as e:
         say_error(key, freetext=str(e))
         HEARTBEAT.debug(ledconfig.DBG_EXCEPTION)
+        raise e
 
 
 def on_led_message(key, message):
@@ -185,7 +186,7 @@ def on_led_message(key, message):
                 return
             elif action == ledconfig.ON_EXCEED_CLEAR:
                 led._stack = []
-                ledconfig.MAX_STACK_SIZE >=1 and led.push()
+                ledconfig.MAX_STACK_SIZE >= 1 and led.stack_active_frame()
             elif action == ledconfig.ON_EXCEED_DENY:
                 say_no(key, "stack", freetext=str(e))
                 return
@@ -197,7 +198,7 @@ def on_led_message(key, message):
             blink=message["&blink"],
             plan=message["&plan"],
             fadein=message["&fadein"],
-            fadeout=message["&fadeout"]
+            fadeout=message["!fadeout"]
         )
 
     say_ok(key)
@@ -234,11 +235,10 @@ def on_knock_message(key, message):
     say_ok(key)
 
 def get_keepalive_value(message):
-    if "keep-alive" in message:
-        keep_alive = message["keep-alive"]
-        if keep_alive != ledconfig.KEEP_ALIVE \
-        and keep_alive > ledconfig.MAX_KEEP_ALIVE:
-            keep_alive = ledconfig.MAX_KEEP_ALIVE
+    if "keepalive" in message:
+        keep_alive = message["keepalive"]
+        if keep_alive != ledconfig.KEEP_ALIVE:
+            keep_alive = min(keep_alive, ledconfig.MAX_KEEP_ALIVE)
         return keep_alive
     return ledconfig.KEEP_ALIVE
 
@@ -250,7 +250,7 @@ def mksay(type):
                subtype=None,
                objects=set(),
                values={},
-               flags=[],
+               flags={},
                freetext=None):
         send_message(key, ledconn.Message(
             type,

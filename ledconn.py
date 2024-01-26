@@ -18,12 +18,18 @@ def format_value(value):
             f"not {type(value).__name__}"
         )
 
-def format_flag(flag):
+def format_flag(flag, value):
     result = re.sub("[^a-z]+", "", flag.lower())
     result = re.sub("_", "-", result)
-    return f"&{result}"
+    symbol = ["!", "&"][value]
+    return f"{symbol}{result}"
 
 def strip_symbol(value, symbol):
+    if isinstance(symbol, tuple) or isinstance(symbol, list):
+        v = value
+        for s in symbol:
+            v = strip_symbol(v, s)
+        return v
     if isinstance(value, str) and value and value[0:len(symbol)] == symbol:
         return value[len(symbol):]
     return value
@@ -34,20 +40,20 @@ class Message:
                  subtype="",
                  objects=set(),
                  values={},
-                 flags=set(),
+                 flags=[],
                  freetext=""
     ):
         self._type = ""
         self._subtype = ""
         self._objects = objects
         self._values = {}
-        self._flags = set()
+        self._flags = {}
         self._freetext = ""
 
         self.type(type)
         self.subtype(subtype)
         self.set_values(**values)
-        self.add_flags(*flags)
+        self.add_flags(flags)
         self.freetext(freetext)
 
     def __str__(self):
@@ -65,13 +71,18 @@ class Message:
         return f"<{self.type()}{self.subtype()} message>"
 
     def __getitem__(self, item):
-        if isinstance(item, str) and item[0] == "&":
-            return item[1:] in self._flags
+        if item[0] == "&":
+            return item[1:] in self._flags and self._flags[item[1:]]
+        if item[0] == "!":
+            flag = item[1:]
+            if flag not in self._flags:
+                return True
+            return self._flags[flag]
         return self._values[item]
 
     def __contains__(self, item):
-        if isinstance(item, str) and item[0] == "&":
-            return item[1:] in self._values
+        if item[0] in ("&", "!"):
+            return item[1:] in self._flags
         return item in self._values
 
     def report(self):
@@ -98,7 +109,7 @@ class Message:
 
     def type(self, *value):
         if value:
-            self._type = strip_symbol(value[0], "-")
+            self._type = strip_symbol(value[0], ":")
             return self
         return f":{self._type}" if self._type else ""
 
@@ -122,9 +133,9 @@ class Message:
         for k, v in self._values.items():
             key = re.sub("-", "_", k)
             pairs[key] = v
-        for f in self._flags:
+        for f, v in self._flags.items():
             flag = re.sub("-", "_", f)
-            pairs[flag] = True
+            pairs[flag] = v
         return pairs
 
     def objects(self):
@@ -167,15 +178,22 @@ class Message:
             for k, v in self._values.items()
         ])
 
-    def add_flags(self, *flags):
-        for f in flags:
-            self._flags.add(strip_symbol(f, "&"))
+    def add_flags(self, flags, value=None):
+        for flag in flags:
+            v = value
+            if v is None:
+                if flag[0] == "&": v = True
+                if flag[0] == "!": v = False
+            if v is None:
+                v = True
+            f = strip_symbol(flag, ("&", "!"))
+            self._flags[f] = v
         return self
-    
+
     def format_flags(self):
         return "".join([
-            f" {format_flag(f)}"
-            for f in self._flags
+            f" {format_flag(f, v)}"
+            for f, v in self._flags.items()
         ])
 
     def freetext(self, *value):
@@ -220,19 +238,22 @@ class Message:
             if other_values:
                 errors.append("".join([
                     "unknown key/value pair(s) ",
-                    ledutil.oxford_comma(sorted(other_values))
+                    ledutil.oxford_comma(list(other_values))
                 ]))
 
         if not allow_other_flags:
-            accepted_flags = set(strip_symbol(f, "&") for f in accepted_flags)
+            accepted_flags = set(
+                strip_symbol(f, ("&", "!"))
+                for f in accepted_flags
+            )
             other_flags = set()
             for f in self._flags:
                 if f not in accepted_flags:
-                    other_flags.add(f"&{f}")
+                    other_flags.add(format_flag(f, self._flags[f]))
             if other_flags:
                 errors.append("".join([
                     "unknown flag(s) ",
-                    ledutil.oxford_comma(sorted(other_flags))
+                    ledutil.oxford_comma(list(other_flags))
                 ]))
 
         if errors:
@@ -252,7 +273,7 @@ class MessageParser:
     T_LIST = re.compile("([0-9]+,[0-9]+(?:,[0-9]+)*)")
     T_TOGGLE = re.compile("(on|off)")
     T_NUMBER = re.compile("([0-9]+)")
-    T_FLAG = re.compile(" +&([a-z-]+)")
+    T_FLAG = re.compile(" +([&!][a-z-]+)")
     T_FREETEXT = re.compile(" +//([^\x0D\x0A]+)")
 
     TOKENS = {
@@ -317,7 +338,7 @@ class MessageParser:
         subtype = subtype.value if subtype else ""
         objects = set()
         values = {}
-        flags = set()
+        flags = []
 
         ok = True
         while ok:
@@ -330,7 +351,7 @@ class MessageParser:
                 continue
 
             if self.parse_flag():
-                flags.add(self._parsed)
+                flags.append(self._parsed)
                 continue
 
             ok = False
@@ -342,7 +363,7 @@ class MessageParser:
             subtype=subtype,
             objects=sorted(objects),
             values=values,
-            flags=sorted(flags),
+            flags=flags,
             freetext=freetext
         )
 

@@ -54,19 +54,19 @@ def main():
     client = Client().connect()
     ready = False
     q = Queue()
-    try:
-        while True:
-            client.loop_once()
-            if client.ready and not ready:
-                ready = True
-                reader = Thread(target=reader_thread, args=(q,))
-                reader.start()
-            if ready:
-                line = get_input(q)
-                line and client.send_message(line)
-                if line is False:
-                    reader.join()
-                    quit()
-    except Exception:
-        quit()
-main()
+    while True:
+        client.loop_once()
+        if client.ready and not ready:
+            ready = True
+            reader = Thread(target=reader_thread, args=(q,))
+            reader.start()
+        if ready:
+            line = get_input(q)
+            line and client.send_message(line)
+            if line is False:
+                reader.join()
+                quit()
+try:
+    main()
+except Exception as e:
+    print(e)
