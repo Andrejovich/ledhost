@@ -1,7 +1,7 @@
 #!/usr/bin/python
 
 import fileinput
-from threading import Thread
+from threading import Thread, Event
 from queue import Queue, Empty
 import ledclient
 
@@ -35,38 +35,51 @@ class Client(ledclient.Ledclient):
         print(f"\x1B[31m  Ledhost error:\n  {message}\x1B[0m", end="")
 
 
-def reader_thread(out_q):
-    for line in fileinput.input(encoding="utf-8"):
-        if line:
+def reader_thread(out_q, stop_event):
+    try:
+        for line in fileinput.input(encoding="utf-8"):
+            if stop_event.is_set():
+                return
             out_q.put(line)
-        else:
-            out_q.put(False)
-            return
+    except Exception as e:
+        print(f"[reader_thread] {e}")
+    out_q.put(False)
+    return
 
 def get_input(q):
     try:
         line = q.get(timeout=1/24)
     except Empty:
         line = None
+    except Exception as e:
+        print("[get_input] {e}")
+        line = False
     return line
 
 def main():
     client = Client().connect()
     ready = False
     q = Queue()
-    while True:
-        client.loop_once()
-        if client.ready and not ready:
-            ready = True
-            reader = Thread(target=reader_thread, args=(q,))
-            reader.start()
-        if ready:
-            line = get_input(q)
-            line and client.send_message(line)
-            if line is False:
-                reader.join()
-                quit()
-try:
-    main()
-except Exception as e:
-    print(e)
+    reader = None
+    stop_event = Event()
+    try:
+        while True:
+            client.loop_once()
+            if client.ready and not ready:
+                ready = True
+                reader = Thread(target=reader_thread, args=(q, stop_event))
+                reader.start()
+            if ready:
+                line = get_input(q)
+                line and client.send_message(line)
+                if line is False:
+                    stop_event.set()
+                    reader.join()
+                    quit()
+    except Exception as e:
+        print("~~~", e)
+        stop_event.set()
+        reader and reader.join()
+        quit()
+
+main()
