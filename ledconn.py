@@ -71,13 +71,17 @@ class Message:
         return f"<{self.type()}{self.subtype()} message>"
 
     def __getitem__(self, item):
-        if item[0] == "&":
-            return item[1:] in self._flags and self._flags[item[1:]]
-        if item[0] == "!":
-            flag = item[1:]
-            if flag not in self._flags:
+        if item[0] in "&!":
+            symbol, flag = item[0], item[1:]
+            has_flag = flag in self._flags
+            value = has_flag and self._flags[flag]
+
+            if symbol == "&":
+                return value
+            if symbol == "!" and has_flag:
+                return self._flags[flag] is False
+            if symbol == "!" and not has_flag:
                 return True
-            return self._flags[flag]
         return self._values[item]
 
     def __contains__(self, item):

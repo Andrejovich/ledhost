@@ -191,6 +191,14 @@ def on_led_message(key, message):
                 say_no(key, "stack", freetext=str(e))
                 return
 
+        fadeout = True
+        if message["&blink"] and not message["&fadeout"]:
+            print("blink and not fadeout")
+            fadeout = False
+        if "&fadeout" in message and not message["&fadeout"]:
+            print("fadeout in message as !fadeout")
+            fadeout = False
+
         led.set_pixel(
             rgb=message["rgb"],
             keep_alive=get_keepalive_value(message),
@@ -198,7 +206,7 @@ def on_led_message(key, message):
             blink=message["&blink"],
             plan=message["&plan"],
             fadein=message["&fadein"],
-            fadeout=message["!fadeout"]
+            fadeout=fadeout
         )
 
     say_ok(key)
