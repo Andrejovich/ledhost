@@ -15,11 +15,12 @@ HEARTBEAT = None
 
 blinkt.set_brightness(ledconfig.BRIGHTNESS / 100)
 
-NOT_EXPIRED     = 0
-EXPIRE_TO_BLINK = 1
-EXPIRE_TO_PLAN  = 2
-EXPIRE_TO_STACK = 3
-EXPIRE_TO_BLACK = 4
+NOT_EXPIRED     = 0     # Frame isn't expired yet.
+EXPIRE_TO_BLINK = 1     # Active frame isn't blinky, but a planned frame is.
+EXPIRE_TO_PLAN  = 2     # Active frame is expired and there are planned frames.
+EXPIRE_TO_STACK = 3     # Active frame is expired and there are stacked frames.
+EXPIRE_TO_FADEOUT = 4   # Active frame is expired and has fadeout.
+EXPIRE_TO_BLACK = 5     # Active frame is expired and there's nothing else to do.
 
 def main():
     global LEDS, HEARTBEAT
@@ -196,7 +197,7 @@ def on_led_message(key, message):
             blink=message["&blink"],
             plan=message["&plan"],
             fadein=message["&fadein"],
-            fadeout=True
+            fadeout=message["&fadeout"]
         )
 
     say_ok(key)
@@ -307,7 +308,7 @@ class BlinktLed:
                   blink=False,
                   plan=False,
                   fadein=False,
-                  fadeout=True):
+                  fadeout=False):
         if stack:
             self.stack_active_frame()
 
@@ -367,6 +368,19 @@ class BlinktLed:
             return self
         gradient = self.frame.get_fadein()
         self.frame = gradient.pop(0)
+        self._setpixel()
+        idx = 0
+        for f in gradient:
+            self.plan.insert(idx, f)
+            idx += 1
+        return self
+
+    def plan_fadeout(self):
+        if not self.frame.fadeout:
+            return self
+        gradient = self.frame.get_fadeout()
+        self.frame = gradient.pop(0)
+        self._setpixel()
         idx = 0
         for f in gradient:
             self.plan.insert(idx, f)
@@ -414,13 +428,18 @@ class BlinktLed:
         has_stack = len(self.stack) > 0
         has_blinky = has_plan and self.plan[0].blink
         is_blinky = self.frame.blink
-        is_off = self.frame == (0,0,0) and not (self.stack or self.plan)
-        if is_off:
+        # is_off = self.frame.rgb == (0,0,0) and not (self.stack or self.plan)
+        is_off = self.frame.rgb == (0,0,0) and len(self.stack) == 0
+        if is_off and has_plan:
+            return EXPIRE_TO_PLAN
+        elif is_off:
             return NOT_EXPIRED
         if (not is_blinky) and has_blinky:
             return EXPIRE_TO_BLINK
         if not self.frame.is_expired():
             return NOT_EXPIRED
+        if self.frame.fadeout:
+            return EXPIRE_TO_FADEOUT
         if has_plan:
             return EXPIRE_TO_PLAN
         if has_stack:
@@ -436,6 +455,8 @@ class BlinktLed:
         if expiration_status == EXPIRE_TO_BLINK:
             self.stack_active_frame(ignore_max_size=True)
             self.activate_planned_frame()
+        elif expiration_status == EXPIRE_TO_FADEOUT:
+            self.plan_fadeout()
         elif expiration_status == EXPIRE_TO_PLAN:
             self.activate_planned_frame()
         elif expiration_status == EXPIRE_TO_STACK:
@@ -453,7 +474,7 @@ class Frame:
                  plan=None,
                  blink=False,
                  fadein=False,
-                 fadeout=True):
+                 fadeout=False):
         self.rgb = rgb
         if not blink:
             self.plan = plan
@@ -473,14 +494,18 @@ class Frame:
 
     def __str__(self):
         rgb = str(self.rgb)
-        keep_alive = expiration = plan = blinking = ""
+        fadein = keep_alive = expiration = plan = blinking = fadeout = ""
+        if self.fadein:
+            fadein = ", w/fade-in"
         if self.keep_alive:
-            keep_alive = f", keep alive {self.keep_alive}s"
+            keep_alive = f", keep alive ~{round(self.keep_alive,2)}s"
         if self.plan:
             plan = f", {len(self.plan)} planned"
         if self.blink:
             blinking = "blinking "
-        return f"<Frame {blinking}{rgb}{keep_alive}{plan}>"
+        if self.fadeout:
+            fadeout = ", w/fade-out"
+        return f"<Frame {blinking}{rgb}{fadein}{fadeout}{keep_alive}{plan}>"
 
     def activate(self):
         self.last_time = time.time()
@@ -488,7 +513,8 @@ class Frame:
     def is_expired(self):
         return self.last_time + self.keep_alive < time.time()
 
-    def get_fadein(self, duration=0.5):
+    def get_fadein(self, duration=None):
+        if duration is None: duration = ledconfig.FADEIN_DURATION
         gradient = [
             Frame(f, keep_alive=ledconfig.FRAME_LENGTH)
             for f in ledutil.gradient(
@@ -496,7 +522,21 @@ class Frame:
                 self.rgb,
                 ledconfig.FPS * duration
         )]
+        gradient[-1].blink = self.blink
         gradient[-1].keep_alive = self.keep_alive
+        gradient[-1].fadeout = self.fadeout
+        return gradient
+
+    def get_fadeout(self, duration=0.5):
+        if duration is None: duration = ledconfig.FADEOUT_DURATION
+        gradient = [
+            Frame(f, keep_alive=ledconfig.FRAME_LENGTH)
+            for f in ledutil.gradient(
+                self.rgb,
+                (0,0,0),
+                ledconfig.FPS * duration
+        )]
+        gradient[-1].blink = self.blink
         return gradient
 
 class Heartbeat:
@@ -521,9 +561,9 @@ class Heartbeat:
         off = (0,0,0)
         self.led \
             .set_pixel(off, blink=True) \
-            .set_pixel(on, blink=True, fadein=True)  \
+            .set_pixel(on, blink=True, fadein=True) \
             .set_pixel(off, blink=True) \
-            .set_pixel(on, blink=True, fadein=True)  \
+            .set_pixel(on, blink=True, fadeout=True)  \
             .set_pixel(off, blink=True)
         self.next_heartbeat = t + ledconfig.HEARTBEAT_INTERVAL
 

@@ -62,6 +62,9 @@ MAX_KEEP_ALIVE = 30
 
 KEEP_ALIVE_BLINK = 0.3
 
+FADEIN_DURATION = 1
+FADEOUT_DURATION = 1
+
 
 # For ledhost: limit how many frames can be held in the stack, the plan, and
 # the blink plan.
