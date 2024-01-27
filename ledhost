@@ -193,10 +193,8 @@ def on_led_message(key, message):
 
         fadeout = True
         if message["&blink"] and not message["&fadeout"]:
-            print("blink and not fadeout")
             fadeout = False
         if "&fadeout" in message and not message["&fadeout"]:
-            print("fadeout in message as !fadeout")
             fadeout = False
 
         led.set_pixel(
@@ -586,7 +584,9 @@ class Heartbeat:
         elif bit == ledconfig.DBG_CONN_WRITE:   rgb = (32, 0, 16)
         elif bit == ledconfig.DBG_MSG_ERR:      rgb = (32, 16, 0)
         elif bit == ledconfig.DBG_EXCEPTION:    rgb = (32, 0, 0)
-        rgb and self.debug_led.set_pixel(rgb, blink=True)
+        if rgb:
+            self.debug_led.set_pixel(rgb, blink=True)
+            self.debug_led.frame.keep_alive /= 4
 
 class MaxSizeReachedError(Exception):
     pass
