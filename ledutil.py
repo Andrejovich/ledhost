@@ -1,6 +1,12 @@
 #!/usr/bin/python
 import ledconfig
 
+# Posible reactions to when a `:led &stack ...` or `:led &plan ...` message would
+# cause a stack or plan to grow beyond its maximum size..
+ON_EXCEED_BYE   = 0xB00F    # Disconnect the 'offending' client.
+ON_EXCEED_CLEAR = 0xC00F    # Clear stack or plan before appending frame.
+ON_EXCEED_DENY  = 0xD00F    # Don't append the 'offending' frame.
+
 def gradient(from_rgb, to_rgb, steps):
     if steps < 2:
         return [to_rgb]

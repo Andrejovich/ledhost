@@ -64,7 +64,6 @@ def main():
 def accept_connection(sock):
     conn, addr = sock.accept()
     print(f"Connection from {addr}.")
-    HEARTBEAT.debug(ledconfig.DBG_CONN_ACCEPT)
     conn.setblocking(False)
     data = ns(
         addr=addr,
@@ -86,7 +85,6 @@ def handle_connection(key, mask):
 
         if inbound:
             data.inbound += inbound.decode()
-            HEARTBEAT.debug(ledconfig.DBG_CONN_READ)
             while "\n" in data.inbound or "\r" in data.inbound:
                 eol = data.inbound.find("\n")
                 eol = eol if eol != -1 else data.inbound.find("\r")
@@ -103,7 +101,6 @@ def handle_connection(key, mask):
             data.is_new = False
             on_connect(key)
         if data.outbound:
-            HEARTBEAT.debug(ledconfig.DBG_CONN_WRITE)
             dots = "" if data.is_outbound_empty else "... "
             print(f"{dots}> {data.outbound!r}")
 
@@ -126,7 +123,6 @@ def on_connect(key):
 def close_connection(key, *args):
     sock, data = key.fileobj, key.data
     print(f"Closing connection to {data.addr}.")
-    HEARTBEAT.debug(ledconfig.DBG_CONN_CLOSE)
     data.outbound = b""
     data.is_outbound_empty = True
     SEL.unregister(sock)
@@ -137,7 +133,6 @@ def handle_line(key, line):
         message = ledconn.MessageParser().parse(line)
     except ledconn.MessageParser.ParseError as e:
         say_no(key, freetext=str(e))
-        HEARTBEAT.debug(ledconfig.DBG_MSG_ERR)
         return
 
     print(message.report())
@@ -157,13 +152,10 @@ def handle_line(key, line):
         handlers[prefixes](key, ledconn.MessageParser().parse(line))
     except ledconn.Message.ValidationError as e:
         say_no(key, freetext=str(e))
-        HEARTBEAT.debug(ledconfig.DBG_MSG_ERR)
     except NoError as e:
         say_no(key, freetext=str(e))
-        HEARTBEAT.debug(ledconfig.DBG_MSG_ERR)
     except Exception as e:
         say_error(key, freetext=str(e))
-        HEARTBEAT.debug(ledconfig.DBG_EXCEPTION)
         raise e
 
 
@@ -555,10 +547,6 @@ class Heartbeat:
             return None
         return get_leds(ledconfig.HEARTBEAT_LED)[0]
 
-    @property
-    def debug_led(self):
-        return get_leds(ledconfig.DEBUG_LED)[0]
-
     def pulse(self):
         t = time.time()
         if self.next_heartbeat > t or self.led is None:
@@ -572,21 +560,6 @@ class Heartbeat:
             .set_pixel(on, blink=True, fadeout=True)  \
             .set_pixel(off, blink=True)
         self.next_heartbeat = t + ledconfig.HEARTBEAT_INTERVAL
-
-    def debug(self, bit):
-        if not ledconfig.DEBUG & bit:
-            return
-
-        rgb = None
-        if bit == ledconfig.DBG_CONN_ACCEPT:    rgb = (0, 32, 0)
-        elif bit == ledconfig.DBG_CONN_CLOSE:   rgb = (32, 32, 0)
-        elif bit == ledconfig.DBG_CONN_READ:    rgb = (0, 32, 16)
-        elif bit == ledconfig.DBG_CONN_WRITE:   rgb = (32, 0, 16)
-        elif bit == ledconfig.DBG_MSG_ERR:      rgb = (32, 16, 0)
-        elif bit == ledconfig.DBG_EXCEPTION:    rgb = (32, 0, 0)
-        if rgb:
-            self.debug_led.set_pixel(rgb, blink=True)
-            self.debug_led.frame.keep_alive /= 4
 
 class MaxSizeReachedError(Exception):
     pass
