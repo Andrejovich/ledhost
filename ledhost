@@ -553,11 +553,19 @@ class Heartbeat:
             return
         on = ledconfig.HEARTBEAT_RGB
         off = (0,0,0)
+        fadein = (
+            ledconfig.HEARTBEAT_FADEIN & 1,
+            ledconfig.HEARTBEAT_FADEIN & 2
+        )
+        fadeout = (
+            ledconfig.HEARTBEAT_FADEOUT & 1,
+            ledconfig.HEARTBEAT_FADEOUT & 2
+        )
         self.led \
             .set_pixel(off, blink=True) \
-            .set_pixel(on, blink=True, fadein=True) \
+            .set_pixel(on, blink=True, fadein=fadein[0], fadeout=fadeout[0]) \
             .set_pixel(off, blink=True) \
-            .set_pixel(on, blink=True, fadeout=True)  \
+            .set_pixel(on, blink=True, fadein=fadein[1], fadeout=fadeout[1]) \
             .set_pixel(off, blink=True)
         self.next_heartbeat = t + ledconfig.HEARTBEAT_INTERVAL
 
