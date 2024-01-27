@@ -39,8 +39,6 @@ CONNECT = (CONNECT_HOST, CONNECT_PORT)
 
         >>> (31*7) & 0b11111
         25
-
-        TODO: Implement using this setting.
 """
 BRIGHTNESS = 25
 

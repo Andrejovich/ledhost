@@ -13,7 +13,7 @@ SEL = selectors.DefaultSelector()
 LEDS = []
 HEARTBEAT = None
 
-blinkt.set_brightness(ledconfig.BRIGHTNESS / 100)
+BRIGHTNESS = None
 
 NOT_EXPIRED     = 0     # Frame isn't expired yet.
 EXPIRE_TO_BLINK = 1     # Active frame isn't blinky, but a planned frame is.
@@ -23,7 +23,7 @@ EXPIRE_TO_FADEOUT = 4   # Active frame is expired and has fadeout.
 EXPIRE_TO_BLACK = 5     # Active frame is expired and there's nothing else to do.
 
 def main():
-    global LEDS, HEARTBEAT
+    global LEDS, HEARTBEAT, BRIGHTNESS
     LEDS = [BlinktLed(i) for i in range(0, blinkt.NUM_PIXELS)]
     HEARTBEAT = Heartbeat()
 
@@ -46,6 +46,11 @@ def main():
 
             HEARTBEAT.pulse()
             any_dirty = False
+            if ledconfig.BRIGHTNESS != BRIGHTNESS:
+                BRIGHTNESS = ledconfig.BRIGTHTNESS
+                blinkt.set_brightness(BRIGHTNESS / 100)
+                any_dirty = True
+
             for led in LEDS:
                 expiration_status = led.is_expired()
                 expiration_status and led.expire(expiration_status)
